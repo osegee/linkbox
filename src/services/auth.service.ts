@@ -148,7 +148,7 @@ export const verifyUserService = async (
       where: { id: otpRecord.id },
       data: { consumedAt: new Date() },
     }),
-    // Upsert ensures 1 row per (userId + deviceId) without P2002 collisions
+    
     prisma.refreshToken.upsert({
       where: {
         userId_deviceId: {
@@ -262,7 +262,7 @@ export const resendVerification = async ({
     throw new AppError(400, "User already verified. Please login");
   }
 
-  // Optional 60-second rate-limit check so users can't spam your email quota
+
   const existingOtp = await prisma.oneTimeCode.findFirst({
     where: { userId: user.id, purpose, consumedAt: null },
     orderBy: { createdAt: "desc" },
@@ -279,7 +279,6 @@ export const resendVerification = async ({
   const hashedOtp = hashOtp(otp);
   const expiresAt = new Date(Date.now() + OTP_TTL_MS);
 
-  // Delete any old unconsumed codes for this purpose and create the fresh one
   await prisma.$transaction([
     prisma.oneTimeCode.deleteMany({
       where: { userId: user.id, purpose, consumedAt: null },
@@ -311,7 +310,7 @@ export const rotateTokensService = async (
     throw new AppError(401, "Refresh token is required");
   }
 
-  // 1. Verify JWT signature & expiration before touching Postgres
+
   let payload: { userId: string; familyId: string; jti?: string };
   try {
     payload = verifyRefreshToken(incomingRefreshToken);
@@ -324,7 +323,6 @@ export const rotateTokensService = async (
 
   const incomingHash = hashRefreshToken(incomingRefreshToken);
 
-  // 2. Look up the single session row by its unique familyId
   const session = await prisma.refreshToken.findUnique({
     where: { familyId: payload.familyId },
   });
@@ -333,26 +331,20 @@ export const rotateTokensService = async (
     throw new AppError(401, "Session no longer exists. Please log in again");
   }
 
-  // 3. Check database expiration
   if (new Date() > session.expiresAt) {
     await prisma.refreshToken.delete({ where: { id: session.id } });
     throw new AppError(401, "Refresh token expired. Please log in again");
   }
 
-  // 4. Device-Binding Check: Ensure the token hasn't been moved to a different physical phone
   if (
     session.deviceId !== "unknown-device" &&
     deviceContext.deviceId !== "unknown-device" &&
     session.deviceId !== deviceContext.deviceId
   ) {
-    // Stolen token used on another device! Nuke the session immediately.
     await prisma.refreshToken.delete({ where: { id: session.id } });
     throw new AppError(401, "Device mismatch detected. Session revoked");
   }
 
-  // ============================================================================
-  // CASE A: NORMAL ROTATION (Incoming token matches currentTokenHash)
-  // ============================================================================
   if (session.currentTokenHash === incomingHash) {
     const newRefreshToken = generateRefreshToken({
       userId: session.userId,
@@ -363,15 +355,15 @@ export const rotateTokensService = async (
     const newHash = hashRefreshToken(newRefreshToken);
     const newExpiry = new Date(Date.now() + REFRESH_TOKEN_TTL_MS);
 
-    // Atomic optimistic lock: only updates if currentTokenHash hasn't changed 1ms ago
+  
     const updated = await prisma.refreshToken.updateMany({
       where: {
         id: session.id,
         currentTokenHash: incomingHash,
       },
       data: {
-        previousTokenHash: incomingHash, // Slide old hash into previous
-        currentTokenHash: newHash, // Save new hash
+        previousTokenHash: incomingHash, 
+        currentTokenHash: newHash, 
         rotatedAt: new Date(),
         expiresAt: newExpiry,
       },
@@ -390,9 +382,6 @@ export const rotateTokensService = async (
     };
   }
 
-  // ============================================================================
-  // CASE B: MOBILE GRACE PERIOD (Matches previousTokenHash within 10 seconds)
-  // ============================================================================
   const timeSinceLastRotation = Date.now() - session.rotatedAt.getTime();
   const isWithinGraceWindow =
     session.previousTokenHash === incomingHash &&
@@ -418,9 +407,6 @@ export const rotateTokensService = async (
     };
   }
 
-  // ============================================================================
-  // CASE C: TOKEN REUSE DETECTED! (Valid JWT for this family, but outdated hash)
-  // ============================================================================
   await prisma.refreshToken.delete({
     where: { id: session.id },
   });
