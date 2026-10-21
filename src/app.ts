@@ -6,6 +6,7 @@ import errorHandler from "./middleware/errorHandler";
 import AppError from "./utils/appError";
 import authRoutes from "./routes/auth.routes";
 import collectionRoutes from "./routes/collection.routes";
+import tagRoutes from "./routes/tag.routes";
 import { env } from "./config/env";
 
 const app: Application = express();
@@ -23,6 +24,7 @@ app.get("/health", (req, res) => {
 
 app.use("/api/auth", authRoutes);
 app.use("/api/collections", collectionRoutes);
+app.use("/api/tags", tagRoutes);
 app.use((req, res, next) => {
   next(new AppError(404, "Route not found"));
 });
