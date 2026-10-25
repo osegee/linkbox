@@ -1,4 +1,5 @@
 import express, { Application } from "express";
+import "./queues/link.queue";
 import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
@@ -7,6 +8,7 @@ import AppError from "./utils/appError";
 import authRoutes from "./routes/auth.routes";
 import collectionRoutes from "./routes/collection.routes";
 import tagRoutes from "./routes/tag.routes";
+import linkRoutes from "./routes/link.routes";
 import { env } from "./config/env";
 
 const app: Application = express();
@@ -25,6 +27,7 @@ app.get("/health", (req, res) => {
 app.use("/api/auth", authRoutes);
 app.use("/api/collections", collectionRoutes);
 app.use("/api/tags", tagRoutes);
+app.use("/api/links", linkRoutes);
 app.use((req, res, next) => {
   next(new AppError(404, "Route not found"));
 });
