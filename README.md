@@ -1,157 +1,208 @@
-# LinkBox API — Asynchronous Bookmarking & Link Management Backend
+# LinkBox API
 
-A production-grade RESTful API built with **Node.js, TypeScript, Express, Prisma (PostgreSQL), and BullMQ (Redis)**. LinkBox allows users to save, organize, and deduplicate web links into collections and tags while asynchronously scraping OpenGraph metadata in the background.
+LinkBox is a backend API that helps developers build bookmarking applications where users can save web links, organize them into collections, tag them, and automatically pull rich previews (like titles, descriptions, images, and site names) from the pages they save.
 
----
-
-## Architectural Highlights
-
-- **Decoupled Ingestion & Background Scraping (BullMQ + Redis + Cheerio):** Saving a link (`POST /api/links`) never blocks the HTTP request waiting on slow third-party websites. The API canonicalizes the URL, persists the record as `PENDING` in milliseconds, and dispatches a job to a Redis-backed BullMQ queue. A background worker scrapes OpenGraph metadata (`og:title`, `og:description`, `og:image`, `og:site_name`) with automatic exponential backoff retries and transitions the link to `READY` (or `FAILED` after exhausting retries).
-- **URL Canonicalization & Deduplication Engine:** Incoming URLs are normalized by stripping marketing/tracking parameters (`utm_source`, `fbclid`, `gclid`, `si`, `ref`), removing hash fragments, and standardizing hostnames. A compound unique constraint (`@@unique([userId, canonicalUrl])`) prevents duplicate saves across different sharing platforms while preserving the original URL.
-- **Stateful Session Security & Refresh Token Rotation:** Uses short-lived JWT access tokens paired with database-backed refresh token rotation, grace-window concurrency handling, reuse detection, and SHA-256 hashed OTP verification flows.
-- **Relational Organization Layer:** Supports 1-to-Many **Collections** (folders with aggregated link counts) and Many-to-Many **Tags** via an explicit `LinkTag` join table using idempotent batch operations and strict user-ownership checks (IDOR prevention).
-- **End-to-End Type Safety & Validation:** Request bodies and parameters are validated at the routing boundary using **Zod** schemas and strongly typed Express controller generics.
+It handles the messy parts behind the scenes, like removing tracking parameters from URLs, preventing duplicate saves, verifying users via email OTP, rotating refresh tokens, and scraping metadata in the background so the main API stays fast and responsive.
 
 ---
 
-## Tech Stack
+## System Architecture
 
-- **Runtime & Language:** Node.js, TypeScript
-- **Framework:** Express.js
-- **Database & ORM:** PostgreSQL, Prisma ORM
-- **Queue & Message Broker:** Redis (`ioredis`), BullMQ
-- **HTML Parsing:** Cheerio
-- **Authentication & Security:** JSON Web Tokens (`jsonwebtoken`), `bcrypt`, Node `crypto` (SHA-256), Zod
+```mermaid
+flowchart LR
+    Client["Web/Mobile Client"]
+    API["LinkBox API Server"]
+    Worker["Background Worker"]
+    Redis[("Redis Queue")]
+    Postgres[("PostgreSQL Database")]
 
----
+    Client -- "HTTPS API" --> API
+    API -- "Enqueue scrape job" --> Redis
+    Worker -- "Pull job" --> Redis
+    Worker -- "Store metadata" --> Postgres
+    API -- "Read/Write" --> Postgres
 
-## System Workflow: Saving a Link
-
-```text
-Client (POST /api/links)
-  │
-  ├── 1. Zod validates URL format & payload
-  ├── 2. URL Utility strips trackers (utm_*, fbclid, si) -> generates canonicalUrl
-  ├── 3. Prisma saves Link with status: "PENDING"
-  ├── 4. BullMQ pushes { linkId, url } to Redis Queue
-  └── 5. Returns 201 Created immediately (~30ms)
-         │
-         ▼ (Asynchronous Background Process)
-BullMQ Worker
-  ├── 6. Pulls job from Redis Queue
-  ├── 7. Fetches HTML & extracts OpenGraph tags via Cheerio
-  └── 8. Updates Link in PostgreSQL -> status: "READY" (or "FAILED" after 3 retries)
+    style Client fill:#1e1b4b,stroke:#6366f1,stroke-width:2px,color:#fff
+    style API fill:#2e1065,stroke:#8b5cf6,stroke-width:2px,color:#fff
+    style Worker fill:#2e1065,stroke:#8b5cf6,stroke-width:2px,color:#fff
+    style Redis fill:#4c0519,stroke:#ef4444,stroke-width:2px,color:#fff
+    style Postgres fill:#0f172a,stroke:#3b82f6,stroke-width:2px,color:#fff
 ```
 
 ---
 
-## Project Structure
+## Features
 
-```text
-src/
-├── config/          # Prisma client & Redis connection setup
-├── controllers/     # Express route handlers (Auth, Collections, Tags, Links)
-├── middleware/      # JWT Auth Guard, Zod validator, Global Error Handler
-├── queues/          # BullMQ producer queue & background scraping worker
-├── routes/          # Express routers mounted under /api/*
-├── schemas/         # Zod validation schemas & inferred TypeScript types
-├── services/        # Business logic & Prisma database queries
-├── utils/           # URL canonicalizer, Cheerio HTML scraper, JWT/OTP helpers, AppError
-├── app.ts           # Express app configuration & middleware wiring
-└── server.ts        # HTTP server entry point
+### Asynchronous Metadata Scraping
+When a user saves a link, the API immediately stores it as `PENDING` and pushes a background job to a Redis queue. A BullMQ worker then fetches the page and extracts OpenGraph metadata (title, description, image, site name) with automatic retries. The link becomes `READY` once scraping succeeds, or `FAILED` if it exhausts all retries.
+
+```mermaid
+sequenceDiagram
+    actor Client
+    participant API as API Server
+    participant Redis as Redis Queue
+    participant Worker as Background Worker
+    participant DB as Database
+
+    Client->>API: Save a new link
+    API->>DB: Store link as PENDING
+    API->>Redis: Enqueue scrape job
+    API-->>Client: Return 201 created
+    Redis->>Worker: Process job
+    Worker->>Worker: Scrape OpenGraph metadata
+    Worker->>DB: Update link to READY
 ```
+
+### URL Canonicalization and Deduplication
+The API strips tracking parameters like `utm_source`, `fbclid`, `gclid`, `si`, and `ref` from URLs, removes hash fragments, and normalizes hostnames. A compound unique constraint on `userId` and `canonicalUrl` prevents the same user from saving the same link twice, even if it came from different sharing platforms.
+
+```mermaid
+flowchart LR
+    UserLink["User pastes link"] --> Clean["Strip tracking params"] --> Check["Check duplicate"] --> Save["Save canonical URL"]
+
+    style UserLink fill:#1e1b4b,stroke:#6366f1,stroke-width:2px,color:#fff
+    style Clean fill:#2e1065,stroke:#8b5cf6,stroke-width:2px,color:#fff
+    style Check fill:#2e1065,stroke:#8b5cf6,stroke-width:2px,color:#fff
+    style Save fill:#0f172a,stroke:#3b82f6,stroke-width:2px,color:#fff
+```
+
+### Secure Authentication
+Users register with email and password, then verify their account with a 6-digit OTP sent via email. Login issues short-lived access tokens and long-lived refresh tokens. Refresh tokens are hashed, rotated on each use, and can be revoked on logout. Password reset also uses OTP verification.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant API as API Server
+    participant DB as Database
+
+    User->>API: Register with email/password
+    API->>DB: Create unverified user + OTP
+    API->>User: Send OTP email
+    User->>API: Submit OTP
+    API->>DB: Mark user verified
+```
+
+### Collections and Tags
+Users can create named collections to group their links and apply tags for flexible organization. Collections enforce unique names per user, tags are created per user, and tags attach to links through a many-to-many relationship. All resource access is scoped to the authenticated owner to prevent unauthorized reads or modifications.
 
 ---
 
-## Getting Started Locally
+## Installation
 
-### 1. Prerequisites
-
-- **Node.js** (v18+)
-- **PostgreSQL** (Local or Neon)
-- **Redis** (Local `redis-server` or Upstash)
-
-### 2. Installation
+1. Clone the repository:
 
 ```bash
-git clone <your-repo-url>
-cd linkbox-backend
+git clone https://github.com/osegee/linkbox.git
+cd linkbox
+```
+
+2. Install dependencies:
+
+```bash
 npm install
 ```
 
-### 3. Environment Variables
-
-Create a `.env` file in the root directory:
+3. Create a `.env` file in the root of the project:
 
 ```env
 PORT=5000
 DATABASE_URL="postgresql://user:password@localhost:5432/linkbox?schema=public"
 REDIS_URL="redis://127.0.0.1:6379"
-
-JWT_SECRET="your_access_token_secret"
+JWT_ACCESS_SECRET="your_access_token_secret"
 JWT_REFRESH_SECRET="your_refresh_token_secret"
-
-# Email / OTP Configuration
 RESEND_API_KEY="your_resend_api_key"
 ```
 
-### 4. Database Migration & Development Server
+4. Set up the database:
 
 ```bash
-# Generate Prisma client and push migrations
 npx prisma migrate dev
+npx prisma generate
+```
 
-# Start the development server (API + BullMQ Worker)
+5. Start the development server:
+
+```bash
 npm run dev
 ```
 
 ---
 
-## API Endpoints Overview
+## Usage
 
-### Authentication (`/api/auth`)
+Once the server is running, it listens on the port defined in your `.env` file (default `5000`). You can check the health endpoint:
 
-| Method | Endpoint                 | Description                                         | Auth Required |
-| :----- | :----------------------- | :-------------------------------------------------- | :-----------: |
-| `POST` | `/api/auth/register`     | Register a new user account & send verification OTP |      No       |
-| `POST` | `/api/auth/verify-email` | Verify account with 6-digit OTP                     |      No       |
-| `POST` | `/api/auth/login`        | Authenticate user & issue Access + Refresh tokens   |      No       |
-| `POST` | `/api/auth/refresh`      | Rotate refresh token & issue new token pair         |      No       |
-| `POST` | `/api/auth/logout`       | Revoke active session refresh token                 |      Yes      |
+```bash
+curl http://localhost:5000/health
+```
 
-### Collections (`/api/collections`)
+You should see:
 
-| Method   | Endpoint               | Description                                  | Auth Required |
-| :------- | :--------------------- | :------------------------------------------- | :-----------: |
-| `POST`   | `/api/collections`     | Create a new collection (folder)             |      Yes      |
-| `GET`    | `/api/collections`     | List user collections with total link counts |      Yes      |
-| `GET`    | `/api/collections/:id` | Get single collection details and its links  |      Yes      |
-| `PATCH`  | `/api/collections/:id` | Rename or update collection description      |      Yes      |
-| `DELETE` | `/api/collections/:id` | Delete a collection                          |      Yes      |
+```json
+{
+  "success": true,
+  "data": { "status": "ok" }
+}
+```
 
-### Tags (`/api/tags`)
+To register a new user:
 
-| Method   | Endpoint                         | Description                                | Auth Required |
-| :------- | :------------------------------- | :----------------------------------------- | :-----------: |
-| `POST`   | `/api/tags`                      | Create a new tag                           |      Yes      |
-| `GET`    | `/api/tags`                      | Get all tags belonging to the user         |      Yes      |
-| `PATCH`  | `/api/tags/:id`                  | Rename an existing tag                     |      Yes      |
-| `DELETE` | `/api/tags/:id`                  | Delete a tag                               |      Yes      |
-| `POST`   | `/api/tags/links/:linkId`        | Attach an array of tags to a specific link |      Yes      |
-| `DELETE` | `/api/tags/links/:linkId/:tagId` | Detach a single tag from a link            |      Yes      |
+```bash
+curl -X POST http://localhost:5000/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "fullName": "Ada Lovelace",
+    "email": "ada@example.com",
+    "password": "securepassword"
+  }'
+```
 
-### Links (`/api/links`)
+To save a new link:
 
-| Method   | Endpoint         | Description                                                  | Auth Required |
-| :------- | :--------------- | :----------------------------------------------------------- | :-----------: |
-| `POST`   | `/api/links`     | Normalize URL, save link (`PENDING`), and enqueue scrape job |      Yes      |
-| `GET`    | `/api/links`     | List saved links (supports `?collectionId=` filter)          |      Yes      |
-| `GET`    | `/api/links/:id` | Get a single link with its collection and attached tags      |      Yes      |
-| `PATCH`  | `/api/links/:id` | Update link title, note, folder, favourite, or archive state |      Yes      |
-| `DELETE` | `/api/links/:id` | Permanently delete a link                                    |      Yes      |
+```bash
+curl -X POST http://localhost:5000/api/links \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://example.com/article?utm_source=twitter",
+    "collectionId": "<optional-collection-id>"
+  }'
+```
 
 ---
 
-## License
+## Technologies Used
 
-ISC
+| Technology | Description |
+|------------|-------------|
+| [Node.js](https://nodejs.org/) | JavaScript runtime |
+| [TypeScript](https://www.typescriptlang.org/) | Typed JavaScript |
+| [Express](https://expressjs.com/) | Web framework |
+| [Prisma](https://www.prisma.io/) | ORM and schema management |
+| [PostgreSQL](https://www.postgresql.org/) | Relational database |
+| [Redis](https://redis.io/) | In-memory queue broker for BullMQ |
+| [BullMQ](https://bullmq.io/) | Background job queue |
+| [Cheerio](https://cheerio.js.org/) | Server-side HTML parsing |
+| [Zod](https://zod.dev/) | Schema validation |
+| [jsonwebtoken](https://github.com/auth0/node-jsonwebtoken) | JWT handling |
+| [bcrypt](https://github.com/kelektiv/node.bcrypt.js) | Password hashing |
+| [Resend](https://resend.com/) | Transactional email delivery |
+| [Helmet](https://helmetjs.github.io/) | Security headers |
+| [Morgan](https://github.com/expressjs/morgan) | HTTP request logging |
+
+---
+
+## Author
+
+Built by **Osegee**.
+
+---
+
+## Badges
+
+[![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-339933?style=for-the-badge&logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Express](https://img.shields.io/badge/Express-000000?style=for-the-badge&logo=express&logoColor=white)](https://expressjs.com/)
+[![Prisma](https://img.shields.io/badge/Prisma-2D3748?style=for-the-badge&logo=prisma&logoColor=white)](https://www.prisma.io/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Redis](https://img.shields.io/badge/Redis-DC382D?style=for-the-badge&logo=redis&logoColor=white)](https://redis.io/)
