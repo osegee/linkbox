@@ -6,7 +6,6 @@ import {
   resendOtpController,
   forgotPasswordController,
   resetPasswordController,
-  logoutAllController,
   logoutController,
   refreshController,
 } from "../controllers/auth.controller";
@@ -45,7 +44,6 @@ router.post(
   resetPasswordController,
 );
 router.post("/logout", logoutController);
-router.post("/logout-all", logoutAllController);
 router.post("/refresh", refreshController);
 
 export default router;

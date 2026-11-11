@@ -1,93 +1,90 @@
-import { Request, Response, NextFunction } from "express";
+import type { Request, Response, NextFunction } from "express";
 import {
   registerUserService,
   verifyUserService,
   loginUserService,
   resendVerification,
-  rotateTokensService,
   forgotPasswordService,
   resetPasswordService,
-  logoutDeviceService,
-  logoutAllDevicesService,
-  DeviceContext,
+  logoutUserService,
+  refreshTokenService,
 } from "../services/auth.service";
+import { cookieOptions } from "../config/cookies";
+import AppError from "../utils/appError";
 
-const extractDeviceContext = (req: Request): DeviceContext => {
-  const deviceId =
-    (req.headers["x-device-id"] as string) ||
-    req.body?.deviceId ||
-    "unknown-device";
-
-  const deviceName =
-    (req.headers["x-device-name"] as string) ||
-    req.headers["user-agent"] ||
-    "LinkBox Mobile Client";
-
-  return { deviceId, deviceName };
-};
-
-const extractRefreshToken = (req: Request): string => {
-  if (req.body?.refreshToken) {
-    return req.body.refreshToken;
-  }
-  const authHeader = req.headers.authorization;
-  if (authHeader?.startsWith("Bearer ")) {
-    return authHeader.split(" ")[1];
-  }
-  return "";
-};
+const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const ACCESS_TOKEN_TTL_MS = 15 * 60 * 1000;
 
 export const registerController = async (
   req: Request,
   res: Response,
-  next: NextFunction
+  next: NextFunction,
 ) => {
   try {
     const user = await registerUserService(req.body);
     return res.status(201).json({
       status: "success",
-      message: "Registration successful. Please check your email for the verification code.",
-      data: { user },
+      message:
+        "Registration successful. Please check your email for the verification code.",
+      data: {
+        id: user.id,
+        email: user.email,
+        fullName: user.fullName,
+        isVerified: user.isVerified,
+        createdAt: user.createdAt,
+      },
     });
   } catch (error) {
     next(error);
   }
 };
-
 
 export const verifyEmailController = async (
   req: Request,
   res: Response,
-  next: NextFunction
+  next: NextFunction,
 ) => {
   try {
-    const deviceContext = extractDeviceContext(req);
-    const result = await verifyUserService(req.body, deviceContext);
+    await verifyUserService(req.body);
 
     return res.status(200).json({
       status: "success",
       message: "Email verified successfully",
-      data: result,
     });
   } catch (error) {
     next(error);
   }
 };
 
-
 export const loginController = async (
   req: Request,
   res: Response,
-  next: NextFunction
+  next: NextFunction,
 ) => {
   try {
-    const deviceContext = extractDeviceContext(req);
-    const result = await loginUserService(req.body, deviceContext);
+    const { accessToken, refreshToken, user } = await loginUserService(
+      req.body,
+    );
+
+    res.cookie("accessToken", accessToken, {
+      ...cookieOptions,
+      maxAge: ACCESS_TOKEN_TTL_MS,
+    });
+
+    res.cookie("refreshToken", refreshToken, {
+      ...cookieOptions,
+      maxAge: REFRESH_TOKEN_TTL_MS,
+    });
 
     return res.status(200).json({
-      status: "success",
       message: "Login successful",
-      data: result,
+      user: {
+        id: user.id,
+        fullName: user.fullName,
+        email: user.email,
+        isVerified: user.isVerified,
+        createdAt: user.createdAt,
+      },
     });
   } catch (error) {
     next(error);
@@ -97,7 +94,7 @@ export const loginController = async (
 export const resendOtpController = async (
   req: Request,
   res: Response,
-  next: NextFunction
+  next: NextFunction,
 ) => {
   try {
     const result = await resendVerification(req.body);
@@ -113,17 +110,27 @@ export const resendOtpController = async (
 export const refreshController = async (
   req: Request,
   res: Response,
-  next: NextFunction
+  next: NextFunction,
 ) => {
   try {
-    const incomingRefreshToken = extractRefreshToken(req);
-    const deviceContext = extractDeviceContext(req);
+    const token = req.cookies?.refreshToken;
+    if (!token) {
+      throw new AppError(401, "Refresh token is required");
+    }
+    const { accessToken, refreshToken } = await refreshTokenService(token);
 
-    const tokens = await rotateTokensService(incomingRefreshToken, deviceContext);
+    res.cookie("accessToken", accessToken, {
+      ...cookieOptions,
+      maxAge: ACCESS_TOKEN_TTL_MS,
+    });
+
+    res.cookie("refreshToken", refreshToken, {
+      ...cookieOptions,
+      maxAge: REFRESH_TOKEN_TTL_MS,
+    });
 
     return res.status(200).json({
-      status: "success",
-      data: tokens,
+      message: "Tokens refreshed successfully",
     });
   } catch (error) {
     next(error);
@@ -133,7 +140,7 @@ export const refreshController = async (
 export const forgotPasswordController = async (
   req: Request,
   res: Response,
-  next: NextFunction
+  next: NextFunction,
 ) => {
   try {
     const result = await forgotPasswordService(req.body);
@@ -146,11 +153,10 @@ export const forgotPasswordController = async (
   }
 };
 
-
 export const resetPasswordController = async (
   req: Request,
   res: Response,
-  next: NextFunction
+  next: NextFunction,
 ) => {
   try {
     const result = await resetPasswordService(req.body);
@@ -166,34 +172,23 @@ export const resetPasswordController = async (
 export const logoutController = async (
   req: Request,
   res: Response,
-  next: NextFunction
+  next: NextFunction,
 ) => {
   try {
-    const incomingRefreshToken = extractRefreshToken(req);
-    await logoutDeviceService(incomingRefreshToken);
+    const token = req.cookies?.refreshToken;
 
-    return res.status(200).json({
-      status: "success",
-      message: "Logged out successfully",
+    await logoutUserService(token);
+
+    res.clearCookie("accessToken", {
+      ...cookieOptions,
     });
-  } catch (error) {
-    next(error);
-  }
-};
 
-
-export const logoutAllController = async (
-  req: Request,
-  res: Response,
-  next: NextFunction
-) => {
-  try {
-    const userId = req.user!.id;
-    await logoutAllDevicesService(userId);
+    res.clearCookie("refreshToken", {
+      ...cookieOptions,
+    });
 
     return res.status(200).json({
-      status: "success",
-      message: "Logged out from all devices successfully",
+      message: "Logout successful",
     });
   } catch (error) {
     next(error);

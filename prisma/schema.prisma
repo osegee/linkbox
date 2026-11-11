@@ -43,18 +43,14 @@ model User {
 model RefreshToken {
   id        String    @id @default(uuid()) 
   userId    String     
-  familyId  String    @unique
-  currentTokenHash  String
-  previousTokenHash String?
-  deviceId          String
+  tokenHash String @unique
+  ipAddress String?
   deviceName        String?
-  rotatedAt         DateTime @default(now())
+  revokedAt        DateTime @default(now())
   expiresAt DateTime
   createdAt DateTime  @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@unique([userId, deviceId])
   @@index([userId])
 }
 
@@ -108,7 +104,6 @@ model Link {
   collection   Collection?   @relation(fields: [collectionId], references: [id], onDelete: SetNull)
   user         User @relation(fields: [userId], references: [id], onDelete: Cascade)
   linkTags     LinkTag[]
-  aiEnrichment AiEnrichment?
 
   @@unique([userId, canonicalUrl])
   @@index([userId, createdAt])
@@ -141,16 +136,3 @@ model LinkTag {
   @@index([tagId])
 }
 
-model AiEnrichment {
-  id        String           @id @default(uuid()) 
-  linkId    String           @unique
-  summary   String?
-  category  String?
-  status    ProcessingStatus @default(PENDING)
-  model     String?
-  error     String?
-  createdAt DateTime         @default(now())
-  updatedAt DateTime         @updatedAt
-
-  link Link @relation(fields: [linkId], references: [id], onDelete: Cascade)
-}

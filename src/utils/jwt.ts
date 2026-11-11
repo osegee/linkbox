@@ -8,8 +8,6 @@ export interface AccessTokenPayload {
 
 export interface RefreshTokenPayload {
   userId: string;
-  familyId: string;
-  jti?: string; 
 }
 
 const JWT_COMMON_OPTIONS = {
@@ -27,8 +25,6 @@ export const generateAccessToken = (payload: AccessTokenPayload): string => {
 export const generateRefreshToken = (payload: RefreshTokenPayload): string => {
   const tokenPayload = {
     userId: payload.userId,
-    familyId: payload.familyId,
-    jti: payload.jti ?? crypto.randomUUID(),
   };
 
   return jwt.sign(tokenPayload, env.JWT_REFRESH_SECRET, {
@@ -37,24 +33,21 @@ export const generateRefreshToken = (payload: RefreshTokenPayload): string => {
   });
 };
 
-
 export const verifyAccessToken = (token: string): AccessTokenPayload => {
   return jwt.verify(
     token,
     env.JWT_ACCESS_SECRET,
-    JWT_COMMON_OPTIONS
+    JWT_COMMON_OPTIONS,
   ) as AccessTokenPayload;
 };
 
-
 export const verifyToken = verifyAccessToken;
-
 
 export const verifyRefreshToken = (token: string): RefreshTokenPayload => {
   return jwt.verify(
     token,
     env.JWT_REFRESH_SECRET,
-    JWT_COMMON_OPTIONS
+    JWT_COMMON_OPTIONS,
   ) as RefreshTokenPayload;
 };
 
